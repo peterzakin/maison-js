@@ -20,6 +20,11 @@ function printEvent(event: StreamEvent, debug: boolean): void {
       `\n[DEBUG ${event.type}] ${JSON.stringify(event.data)}\n`
     );
   }
+  if (event.type === "preview_url") {
+    const { port, url } = event.data as { port: number; url: string };
+    process.stdout.write(`\n[preview] Port ${port} → ${url}\n`);
+    return;
+  }
   if (event.type === "stderr") {
     stderr.write(`\n[stderr] ${event.content}\n`);
     return;
