@@ -39,6 +39,16 @@ export class StreamEvent {
   }
 }
 
+/**
+ * Well-known file path where Claude writes exposed port numbers (one per line).
+ */
+const EXPOSED_PORTS_FILE = "/tmp/maison-exposed-ports";
+
+/**
+ * System prompt fragment injected when port exposure is enabled.
+ */
+const PORT_EXPOSURE_INSTRUCTIONS = `When you start a development server or any process that listens on a network port, write the port number to the file ${EXPOSED_PORTS_FILE} (one port per line, append mode). For example: echo 3000 >> ${EXPOSED_PORTS_FILE}`;
+
 export interface StreamOptions {
   /** Custom instructions appended to Claude Code's system prompt. */
   instructions?: string;
@@ -46,6 +56,12 @@ export interface StreamOptions {
   continueConversation?: boolean;
   /** Seconds between file polls for new output (default 0.3). */
   pollInterval?: number;
+  /**
+   * When true, Claude is instructed to register exposed ports so that
+   * preview URLs are automatically surfaced as stream events.
+   * Defaults to true.
+   */
+  exposePreviewUrls?: boolean;
 }
 
 /**
@@ -107,6 +123,7 @@ export class MaisonSandbox {
       instructions,
       continueConversation = false,
       pollInterval = 0.3,
+      exposePreviewUrls = true,
     } = options;
 
     const sessionId = await this._ensureSession();
@@ -124,8 +141,15 @@ export class MaisonSandbox {
 
     const escapedPrompt = shellQuote(prompt);
     let optionalFlags = "";
-    if (instructions) {
-      optionalFlags += ` --append-system-prompt ${shellQuote(instructions)}`;
+
+    // Merge user instructions with port exposure instructions.
+    const allInstructions = [
+      ...(exposePreviewUrls ? [PORT_EXPOSURE_INSTRUCTIONS] : []),
+      ...(instructions ? [instructions] : []),
+    ].join("\n\n");
+
+    if (allInstructions) {
+      optionalFlags += ` --append-system-prompt ${shellQuote(allInstructions)}`;
     }
     if (continueConversation) {
       optionalFlags += " --continue";
@@ -146,6 +170,9 @@ export class MaisonSandbox {
       command: cmd,
       runAsync: true,
     });
+
+    // Track ports we've already emitted preview URLs for.
+    const emittedPorts = new Set<number>();
 
     // Poll the output file for new NDJSON lines.
     let offset = 0;
@@ -231,10 +258,55 @@ export class MaisonSandbox {
         // done_file doesn't exist yet.
       }
 
+      // Check for newly exposed ports and emit preview_url events.
+      if (exposePreviewUrls) {
+        yield* this._checkExposedPorts(emittedPorts);
+      }
+
       await new Promise((resolve) =>
         setTimeout(resolve, pollInterval * 1000)
       );
     }
+
+    // Final check for ports after command completes.
+    if (exposePreviewUrls) {
+      yield* this._checkExposedPorts(emittedPorts);
+    }
+  }
+
+  /**
+   * Read the exposed-ports file and emit preview_url events for any new ports.
+   */
+  private async *_checkExposedPorts(
+    emittedPorts: Set<number>
+  ): AsyncGenerator<StreamEvent> {
+    try {
+      const content = await this._readSandboxFile(EXPOSED_PORTS_FILE);
+      for (const line of content.split("\n")) {
+        const port = parseInt(line.trim(), 10);
+        if (!Number.isNaN(port) && port > 0 && !emittedPorts.has(port)) {
+          emittedPorts.add(port);
+          const { url } = await this._sandbox.getPreviewLink(port);
+          yield new StreamEvent("preview_url", {
+            type: "preview_url",
+            port,
+            url,
+          });
+        }
+      }
+    } catch {
+      // File doesn't exist yet — no ports exposed.
+    }
+  }
+
+  /**
+   * Get a preview URL for a service running on the given port inside the sandbox.
+   *
+   * The sandbox must have a process listening on the port for the URL to work.
+   */
+  async getPreviewUrl(port: number): Promise<string> {
+    const result = await this._sandbox.getPreviewLink(port);
+    return result.url;
   }
 
   /** Read a file from the sandbox filesystem. */
