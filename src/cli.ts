@@ -4,7 +4,7 @@
 
 import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
-import { stdin, stdout, stderr } from "node:process";
+import { stdin, stdout } from "node:process";
 import { Maison, StreamEvent } from "./sandbox.js";
 
 interface CliOptions {
@@ -12,6 +12,44 @@ interface CliOptions {
   instructions?: string;
   snapshot: string;
   debug: boolean;
+}
+
+interface ContentBlock {
+  type: string;
+  text?: string;
+  thinking?: string;
+  name?: string;
+  input?: unknown;
+  content?: string;
+}
+
+function printContentBlock(block: ContentBlock): void {
+  switch (block.type) {
+    case "thinking":
+      if (block.thinking) {
+        process.stdout.write(`\n[thinking] ${block.thinking}\n`);
+      }
+      break;
+    case "text":
+      if (block.text) {
+        process.stdout.write(block.text);
+      }
+      break;
+    case "tool_use":
+      process.stdout.write(
+        `\n[tool_use] ${block.name ?? "unknown"}` +
+          (block.input ? `: ${JSON.stringify(block.input)}` : "") +
+          "\n"
+      );
+      break;
+    case "tool_result": {
+      const text = typeof block.content === "string" ? block.content : "";
+      if (text) {
+        process.stdout.write(`\n[tool_result] ${text.slice(0, 500)}\n`);
+      }
+      break;
+    }
+  }
 }
 
 function printEvent(event: StreamEvent, debug: boolean): void {
@@ -26,9 +64,36 @@ function printEvent(event: StreamEvent, debug: boolean): void {
     return;
   }
   if (event.type === "stderr") {
-    stderr.write(`\n[stderr] ${event.content}\n`);
+    process.stdout.write(`\n[stderr] ${event.content}\n`);
     return;
   }
+
+  // Claude Code stream-json wraps content in assistant events with
+  // message.content as an array of typed blocks.
+  if (event.type === "assistant") {
+    const msg = event.data.message as Record<string, unknown> | undefined;
+    const blocks = msg?.content;
+    if (Array.isArray(blocks)) {
+      for (const block of blocks as ContentBlock[]) {
+        printContentBlock(block);
+      }
+      return;
+    }
+  }
+
+  // tool_result events appear at the top level too.
+  if (event.type === "tool_result") {
+    const output =
+      (event.data.content as string) ??
+      (event.data.output as string) ??
+      "";
+    if (output) {
+      process.stdout.write(`\n[tool_result] ${output.slice(0, 500)}\n`);
+    }
+    return;
+  }
+
+  // Fallback: print any plain text content.
   const content = event.content;
   if (content) {
     process.stdout.write(content);
