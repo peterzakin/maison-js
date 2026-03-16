@@ -62,6 +62,8 @@ export interface StreamOptions {
    * Defaults to true.
    */
   exposePreviewUrls?: boolean;
+  /** Maximum seconds to wait for Claude to finish before timing out (default 300). */
+  timeout?: number;
 }
 
 /**
@@ -124,6 +126,7 @@ export class MaisonSandbox {
       continueConversation = false,
       pollInterval = 0.3,
       exposePreviewUrls = true,
+      timeout = 300,
     } = options;
 
     const sessionId = await this._ensureSession();
@@ -157,7 +160,7 @@ export class MaisonSandbox {
 
     const cmd =
       `ANTHROPIC_API_KEY=${shellQuote(this._anthropicApiKey)} ` +
-      `claude --dangerously-skip-permissions ` +
+      `stdbuf -oL claude --dangerously-skip-permissions ` +
       `-p ${escapedPrompt} ` +
       `--output-format stream-json ` +
       `--verbose` +
@@ -177,8 +180,15 @@ export class MaisonSandbox {
     // Poll the output file for new NDJSON lines.
     let offset = 0;
     let partialLine = "";
+    const deadline = Date.now() + timeout * 1000;
 
     while (true) {
+      if (Date.now() > deadline) {
+        throw new Error(
+          `Claude Code did not finish within ${timeout} seconds. ` +
+            `Increase the timeout option if more time is needed.`
+        );
+      }
       // Read current file contents.
       let content = "";
       try {
